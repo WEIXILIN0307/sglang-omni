@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import Field
 
@@ -37,6 +37,9 @@ QWEN3_ASR_TORCH_MPS_MAX_AUDIO_SECONDS = 60.0
 class Qwen3ASRFactoryArgs(FactoryArgs):
     """Qwen3-ASR's own constructor knobs, typed like the shared ones."""
 
+    pd_role: Literal["prefill", "decode"] | None = None
+    pd_stage_name: str | None = None
+    pd_partner_stage: str | None = None
     enable_pre_lm_encoder: bool | None = None
     pre_lm_cache_max_entries: int | None = Field(default=None, ge=1)
     pre_lm_cache_size_bytes: int | None = Field(default=None, ge=1)
@@ -151,4 +154,53 @@ class Qwen3ASRPipelineConfig(PipelineConfig):
         )
 
 
+def pd_stages() -> list[StageConfig]:
+    prefill = (
+        Qwen3ASRPipelineConfig.model_fields["stages"].default[0].model_copy(deep=True)
+    )
+    prefill.terminal = False
+    prefill.next = "asr_decode"
+    prefill.factory = prefill.factory.model_copy(
+        update={
+            "pd_role": "prefill",
+            "pd_stage_name": "asr",
+            "pd_partner_stage": "asr_decode",
+        }
+    )
+    prefill.engine = prefill.engine.model_copy(
+        update={
+            "disable_radix_cache": True,
+            "page_size": 1,
+            "disable_speculative_decoding": True,
+        }
+    )
+    decode = prefill.model_copy(deep=True)
+    decode.name = "asr_decode"
+    decode.process = "asr_decode"
+    decode.gpu = 1
+    decode.next = None
+    decode.terminal = True
+    decode.factory = decode.factory.model_copy(
+        update={
+            "pd_role": "decode",
+            "pd_stage_name": "asr_decode",
+            "pd_partner_stage": None,
+            "enable_pre_lm_encoder": False,
+            "enable_encoder_cuda_graph": False,
+        }
+    )
+    return [prefill, decode]
+
+
+class Qwen3ASRPDPipelineConfig(Qwen3ASRPipelineConfig):
+    """Explicit PD for chunk-local transcription with the existing ASR pipeline."""
+
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "asr": Qwen3ASRStageConfig,
+        "asr_decode": Qwen3ASRStageConfig,
+    }
+    stages: list[StageConfig] = Field(default_factory=pd_stages)
+
+
 EntryClass = Qwen3ASRPipelineConfig
+Variants = {"pd": Qwen3ASRPDPipelineConfig}
