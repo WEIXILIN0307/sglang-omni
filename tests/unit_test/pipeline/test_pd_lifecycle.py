@@ -263,6 +263,31 @@ def test_prefill_handoff_cleanup_failure_emits_error_and_releases_kv(
     assert not batch.batch_is_full
 
 
+@pytest.mark.parametrize("committed_tokens", [2, 3])
+def test_dflash_prefill_leases_only_a_completed_prompt(committed_tokens: int) -> None:
+    scheduler = prefill_scheduler_for_handoff()
+    scheduler.draft_worker = Mock()
+    request, batch = prefill_handoff_batch(scheduler)
+    request.kv.kv_committed_len = committed_tokens
+
+    scheduler.handoff_prefilled_requests(batch, {id(request)})
+
+    message = scheduler.outbox.get_nowait()
+    if committed_tokens == 3:
+        assert message.type == "kv_transfer"
+        assert message.data.source_page_indices == (1, 2, 3)
+        scheduler.release_request_kv_cache.assert_not_called()
+        message.data.lease.release()
+        message.data.lease.release()
+        scheduler.drain_due_releases()
+    else:
+        assert message.type == "error"
+        assert "complete prompt KV" in str(message.data)
+    scheduler.release_request_kv_cache.assert_called_once_with(request)
+    assert not scheduler.pd_holds_kv()
+    assert batch.reqs == []
+
+
 def test_a_failing_release_does_not_strand_the_rest_of_the_queue(monkeypatch):
     scheduler = decode_scheduler()
     released = []
@@ -331,6 +356,7 @@ def decode_scheduler():
     scheduler.pd_deferred_admission = None
     scheduler.pd_lifecycle_lock = threading.RLock()
     scheduler.pd_state_restorer = lambda *args: None
+    scheduler.enable_overlap = False
     scheduler.aborted_request_ids = set()
     scheduler.req_to_token_pool = ReqPool()
     scheduler.token_to_kv_pool_allocator = KVAllocator()
@@ -476,6 +502,35 @@ def test_deferred_admission_abort_frees_committed_pages_once():
     scheduler.drain_decode_admissions()
     assert len(scheduler.token_to_kv_pool_allocator.freed) == 1
     assert scheduler.waiting_queue == []
+
+
+def test_transfer_abort_holds_lifecycle_lock_through_slot_release() -> None:
+    scheduler = decode_scheduler()
+    receiver = scheduler.pd_receiver
+    message = make_message()
+    destination = receiver.reserve(message)
+    allocator = scheduler.token_to_kv_pool_allocator
+    free_slots = allocator.free
+
+    def can_enter_lifecycle() -> bool:
+        if not receiver.lock.acquire(blocking=False):
+            return False
+        receiver.lock.release()
+        return True
+
+    with ThreadPoolExecutor(1) as observer:
+
+        def free(slots: torch.Tensor) -> None:
+            assert not observer.submit(can_enter_lifecycle).result(timeout=5)
+            free_slots(slots)
+
+        allocator.free = free
+        receiver.abort(message, destination, RuntimeError("copy failed"))
+        receiver.abort(message, destination, RuntimeError("duplicate abort"))
+    assert [slots.tolist() for slots in allocator.freed] == [
+        list(destination.page_indices)
+    ]
+    assert not receiver.has_reservations()
 
 
 def test_stop_string_requires_and_uses_model_tokenizer():

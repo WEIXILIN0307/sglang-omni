@@ -562,3 +562,11 @@ The handoff carries audio duration, language, the retained text prefix and the e
 The candidate requires CUDA, TP=1, page size 1 and disabled radix cache. No end-to-end GPU correctness or performance result is established. Before a benchmark, compare native and PD transcription for explicit/automatic language, Unicode and whitespace, short and chunked long audio, rollback prefixes, streaming and non-streaming, one-token termination, cancellation and recovery. Check request/KV pool reclamation and first-token/final-output ordering. Run `tests/unit_test/qwen3_asr/test_pd.py` together with the native ASR and generic PD lifecycle/stream-failure suites in the pinned runtime.
 
 For performance, keep the same audio chunking and compare equal GPU counts with identical input audio and output budgets. Measure encoder, LM Prefill and Decode separately. Short chunks can leave too little Prefill work to offset transfer and duplicated weights; PD benefit must be measured under concurrent transcription rather than inferred from audio duration.
+
+To opt in to PD with DFlash, use the paired profile:
+
+```bash
+sgl-omni serve --config examples/configs/qwen3_asr_pd_dflash.yaml
+```
+
+Both stages require the same Target and Draft checkpoints and compatible full-context KV layouts. The Prefill stage materializes both prompt caches before handing off. Decode restores the first token and continues DFlash verification. The profile uses synchronous speculative Prefill and keeps Decode overlap available. The no-draft PD profile remains available at `examples/configs/qwen3_asr_pd.yaml`.

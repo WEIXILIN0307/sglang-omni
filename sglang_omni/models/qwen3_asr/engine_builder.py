@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Callable, Literal
 
@@ -160,6 +161,8 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
             pass
         self.max_running_requests = max_running_requests
         self.draft_checkpoint: TemporaryDirectory[str] | None = None
+        self.pd_dflash_model_id: str | None = None
+        self.pd_dflash_greedy_only: bool = False
         self.max_new_tokens = max_new_tokens
         self.enable_async_decode = enable_async_decode
         self.enable_plain_fallback = enable_plain_fallback
@@ -454,6 +457,52 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
             )
             overrides["speculative_draft_model_path"] = self.draft_checkpoint.name
             overrides["speculative_draft_model_revision"] = None
+            if self.pd_role is not None:
+                from sglang.srt.speculative.dflash_utils import (
+                    is_dflash_sampling_verify_available,
+                )
+
+                from sglang_omni.speculative.dflash_draft import (
+                    ReducedVocabularyDFlashWorker,
+                    draft_worker_class,
+                )
+
+                draft_directory = Path(self.draft_checkpoint.name)
+                if (
+                    draft_worker_class(self.draft_checkpoint.name)
+                    is not ReducedVocabularyDFlashWorker
+                ):
+                    raise ValueError(
+                        "Qwen3-ASR PD requires a DFlash draft without a candidate selector"
+                    )
+                elif overrides.get("speculative_draft_window_size") is not None:
+                    raise ValueError(
+                        "Qwen3-ASR PD DFlash requires a shared, non-compact Draft request table"
+                    )
+                elif self.enable_plain_fallback:
+                    raise ValueError(
+                        "Qwen3-ASR PD DFlash does not support plain fallback"
+                    )
+                else:
+                    pass
+                self.pd_dflash_model_id = "\n".join(
+                    (
+                        str(Path(self.checkpoint_dir).resolve()),
+                        (draft_directory / "config.json").read_text(),
+                        *sorted(
+                            str(path.resolve())
+                            for path in draft_directory.glob("*.safetensors")
+                        ),
+                    )
+                )
+                self.pd_dflash_greedy_only = not is_dflash_sampling_verify_available()
+                if self.pd_role == "prefill":
+                    # note (weixilin): a pending Prefill result still owns the rows until handoff detaches them.
+                    self.enable_async_decode = False
+                else:
+                    pass
+            else:
+                pass
             # note (wilsonzheng0327): async decode under a draft is speculative overlap, which SGLang turns on through its overlap scheduler.
             overrides["disable_overlap_schedule"] = not self.enable_async_decode
             overrides["enable_mixed_chunk"] = False
@@ -595,7 +644,8 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
             should_wait_for_encode=self.should_wait_for_encode,
             # NPU DFlash verification uses argmax and cannot preserve sampling.
             greedy_only=self.uses_torch_mps()
-            or (current_platform.is_npu() and self.draft_checkpoint is not None),
+            or (current_platform.is_npu() and self.draft_checkpoint is not None)
+            or self.pd_dflash_greedy_only,
         )
 
     def make_scheduler(
@@ -657,6 +707,7 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
                 stage_name=self.pd_stage_name,
                 partner_stage=self.pd_partner_stage,
                 state_builder=adapter.build_state,
+                dflash_model_id=self.pd_dflash_model_id,
                 **scheduler_kwargs,
             )
         else:
@@ -665,6 +716,7 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
                 state_restorer=adapter.restore_state,
                 resume_schema=adapter.schema,
                 emit_transferred_token=True,
+                dflash_model_id=self.pd_dflash_model_id,
                 **scheduler_kwargs,
             )
 

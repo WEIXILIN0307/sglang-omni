@@ -142,6 +142,7 @@ def test_asr_pd_uses_existing_scheduler_factory_hook(
     builder.pd_role = role
     builder.pd_stage_name = "asr" if role == "prefill" else "asr_decode"
     builder.pd_partner_stage = "asr_decode"
+    builder.pd_dflash_model_id = None
     builder.tokenizer = FakeTokenizer()
     builder.make_abort_callback = Mock(return_value=None)
     builder.make_request_finished_callback = Mock(return_value=None)
