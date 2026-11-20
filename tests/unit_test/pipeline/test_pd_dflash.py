@@ -111,12 +111,15 @@ def test_joint_kv_rejects_wrong_row_capacity_or_registration_order() -> None:
     "variant, error",
     [
         ("valid", None),
+        ("compact_table", None),
         ("missing_opt_in", "explicitly configured DFlash"),
         ("eagle", "explicitly configured DFlash"),
         ("cpu", "requires CUDA"),
         ("fallback", "plain fallback"),
         ("missing_draft", "device-resident draft worker"),
         ("private_table", "shared, direct KV slot mapping"),
+        ("compact_shared_table", "shared, direct KV slot mapping"),
+        ("compact_short_table", "shared, direct KV slot mapping"),
         ("private_allocator", "shared, direct KV slot mapping"),
         ("translated_slots", "shared, direct KV slot mapping"),
     ],
@@ -136,6 +139,9 @@ def test_pd_dflash_validates_the_initialized_worker(
     scheduler.page_size = 1
     scheduler.device = "cpu" if variant == "cpu" else "cuda:0"
     scheduler.enable_plain_fallback = variant == "fallback"
+    scheduler.req_to_token_pool = ReqToTokenPool(
+        4, 32, "cpu", enable_memory_saver=False
+    )
     scheduler.token_to_kv_pool_allocator.get_kvcache = Mock(
         return_value=RowKVCache(8, (2, 4), torch.bfloat16)
     )
@@ -149,7 +155,14 @@ def test_pd_dflash_validates_the_initialized_worker(
     draft_runner = SimpleNamespace(
         token_to_kv_pool=RowKVCache(8, (1, 4), torch.bfloat16),
         req_to_token_pool=(
-            object() if variant == "private_table" else scheduler.req_to_token_pool
+            ReqToTokenPool(
+                3 if variant == "compact_short_table" else 4,
+                32,
+                "cpu",
+                enable_memory_saver=False,
+            )
+            if variant in ("private_table", "compact_table", "compact_short_table")
+            else scheduler.req_to_token_pool
         ),
         token_to_kv_pool_allocator=(
             object()
@@ -166,7 +179,10 @@ def test_pd_dflash_validates_the_initialized_worker(
     scheduler.draft_worker = (
         None
         if variant == "missing_draft"
-        else SimpleNamespace(draft_worker=SimpleNamespace(model_runner=draft_runner))
+        else SimpleNamespace(
+            draft_worker=SimpleNamespace(model_runner=draft_runner),
+            use_compact_draft_cache=variant.startswith("compact_"),
+        )
     )
     model_id = None if variant == "missing_opt_in" else "model"
     if error is None:

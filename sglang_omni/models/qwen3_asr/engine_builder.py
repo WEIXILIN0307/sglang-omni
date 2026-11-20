@@ -474,10 +474,6 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
                     raise ValueError(
                         "Qwen3-ASR PD requires a DFlash draft without a candidate selector"
                     )
-                elif overrides.get("speculative_draft_window_size") is not None:
-                    raise ValueError(
-                        "Qwen3-ASR PD DFlash requires a shared, non-compact Draft request table"
-                    )
                 elif self.enable_plain_fallback:
                     raise ValueError(
                         "Qwen3-ASR PD DFlash does not support plain fallback"
