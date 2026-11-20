@@ -142,6 +142,7 @@ def test_asr_pd_uses_existing_scheduler_factory_hook(
     builder.pd_role = role
     builder.pd_stage_name = "asr" if role == "prefill" else "asr_decode"
     builder.pd_partner_stage = "asr_decode"
+    builder.draft_checkpoint = Mock()
     builder.tokenizer = FakeTokenizer()
     builder.make_abort_callback = Mock(return_value=None)
     builder.make_request_finished_callback = Mock(return_value=None)
@@ -172,6 +173,7 @@ def test_asr_pd_uses_existing_scheduler_factory_hook(
     assert runner is builder.make_model_runner.return_value
     arguments = factory.call_args.kwargs
     assert arguments["stage_name"] == builder.pd_stage_name
+    assert arguments["enable_dflash"] is True
     if role == "prefill":
         assert arguments["stream_output_builder"] is None
         assert arguments["partner_stage"] == "asr_decode"
