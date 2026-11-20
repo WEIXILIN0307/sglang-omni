@@ -559,6 +559,22 @@ Use `sgl-omni serve --config examples/configs/qwen3_asr_pd.yaml` to select expli
 
 The handoff carries audio duration, language, the retained text prefix and the engine start timestamp on the same host in addition to the generic token/KV continuation. It reconstructs `Qwen3ASRRequestData` and the model's text-equivalent mRoPE state without sending waveform/features/encoder outputs. Decode owns first-token streaming, including the existing suppression of the auto-language header. This supports independent chunk requests with text-prefix rollback; native retained-KV sessions remain unsupported.
 
-The candidate requires CUDA, TP=1, page size 1 and disabled radix cache. No end-to-end GPU correctness or performance result is established. Before a benchmark, compare native and PD transcription for explicit/automatic language, Unicode and whitespace, short and chunked long audio, rollback prefixes, streaming and non-streaming, one-token termination, cancellation and recovery. Check request/KV pool reclamation and first-token/final-output ordering. Run `tests/unit_test/qwen3_asr/test_pd.py` together with the native ASR and generic PD lifecycle/stream-failure suites in the pinned runtime.
+The profile requires CUDA, TP=1, page size 1 and disabled RadixCache. On an RTX A6000, native and PD transcription produced the same normalized WER and CER on the 73-utterance dummy LibriSpeech validation split at concurrency 1 and 8. Run `tests/unit_test/qwen3_asr/test_pd.py` together with the native ASR and generic PD lifecycle and stream-failure suites.
 
 For performance, keep the same audio chunking and compare equal GPU counts with identical input audio and output budgets. Measure encoder, LM Prefill and Decode separately. Short chunks can leave too little Prefill work to offset transfer and duplicated weights; PD benefit must be measured under concurrent transcription rather than inferred from audio duration.
+
+To opt in to PD with DFlash, use the paired profile. The default placement uses two visible CUDA GPUs, with Prefill on device 0 and Decode on device 1.
+
+```bash
+sgl-omni serve --config examples/configs/qwen3_asr_pd_dflash.yaml
+```
+
+Both stages require the same Target and Draft checkpoints and compatible full-context KV layouts. Pin the model revisions or use immutable local checkpoints. The Prefill stage materializes both prompt caches before handing off. Decode restores the first token and continues DFlash verification. The profile uses synchronous speculative Prefill and keeps Decode overlap available. Each stage captures CUDA graphs for its own phase. The no-draft PD profile is available at `examples/configs/qwen3_asr_pd.yaml`.
+
+Run a streaming transcription against the example server. The final `transcript.text.done` event includes the full text and DFlash verification statistics.
+
+```bash
+curl --fail-with-body --no-buffer http://localhost:8000/v1/audio/transcriptions \
+  -F 'file=@tests/data/query_to_draw.wav' -F stream=true \
+  -F temperature=0 -F return_spec_tokens_details=true
+```

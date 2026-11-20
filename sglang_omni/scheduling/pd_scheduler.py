@@ -18,7 +18,8 @@ from sglang.srt.mem_cache.allocator.swa import (
     PureSWATokenToKVPoolAllocator,
     SWATokenToKVPoolAllocator,
 )
-from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool
+from sglang.srt.mem_cache.kv_index_translator import IdSpaceKind
+from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool, KVCache
 
 from sglang_omni.comm import KVPageTransfer
 from sglang_omni.scheduling.message import OutgoingMessage, put_messages
@@ -131,10 +132,15 @@ class OmniPrefillScheduler(PDKVLifecycle):
         stage_name: str,
         partner_stage: str,
         state_builder: Callable,
+        dflash_model_id: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        validate_pd_runtime(self)
+        draft_kv_pool = validate_pd_runtime(self, dflash_model_id)
+        if draft_kv_pool is not None and self.enable_overlap:
+            raise ValueError("PD DFlash Prefill must use a synchronous worker")
+        else:
+            pass
 
         self.pd_stage_name = stage_name
         self.pd_partner_stage = partner_stage
@@ -143,6 +149,8 @@ class OmniPrefillScheduler(PDKVLifecycle):
         pool = build_kv_pool(
             self.token_to_kv_pool_allocator.get_kvcache(),
             pool_id=self.pd_pool_id,
+            draft_kv_pool=draft_kv_pool,
+            dflash_model_id=dflash_model_id,
         )
         self.kv_registrations = ((pool, None),)
 
@@ -218,6 +226,15 @@ class OmniPrefillScheduler(PDKVLifecycle):
                 continuation = continuation_from_req(
                     req, transfer_id, self.pd_state_builder
                 )
+                if self.draft_worker is not None and (
+                    len(continuation.output_ids) != 1
+                    or req.kv.kv_committed_len != len(continuation.origin_input_ids)
+                ):
+                    raise ValueError(
+                        "PD DFlash requires complete prompt KV and one sampled token"
+                    )
+                else:
+                    pass
                 source_page_indices = request_page_indices(self.req_to_token_pool, req)
                 metadata = {"decode_continuation": continuation.encode()}
             except Exception as exc:
@@ -302,6 +319,7 @@ class OmniDecodeScheduler(PDKVLifecycle):
         state_restorer: Callable,
         resume_schema: str,
         emit_transferred_token: bool = False,
+        dflash_model_id: str | None = None,
         **kwargs,
     ) -> None:
         self.pd_admissions = queue.SimpleQueue()
@@ -310,7 +328,7 @@ class OmniDecodeScheduler(PDKVLifecycle):
         self.pd_state_restorer = state_restorer
         self.emit_transferred_token = emit_transferred_token
         super().__init__(*args, **kwargs)
-        validate_pd_runtime(self)
+        draft_kv_pool = validate_pd_runtime(self, dflash_model_id)
         serialize_kv_allocator(
             self.token_to_kv_pool_allocator,
             lock=self.pd_lifecycle_lock,
@@ -320,6 +338,8 @@ class OmniDecodeScheduler(PDKVLifecycle):
         pool = build_kv_pool(
             self.token_to_kv_pool_allocator.get_kvcache(),
             pool_id=pool_id,
+            draft_kv_pool=draft_kv_pool,
+            dflash_model_id=dflash_model_id,
         )
         receiver = DecodeKVReceiver(
             pool_id=pool_id,
@@ -423,6 +443,13 @@ class OmniDecodeScheduler(PDKVLifecycle):
                 else:
                     pass
                 try:
+                    if (
+                        self.draft_worker is not None
+                        and len(admission.continuation.output_ids) != 1
+                    ):
+                        raise ValueError("PD DFlash requires exactly one Prefill token")
+                    else:
+                        pass
                     req = req_from_continuation(
                         admission.continuation,
                         admission.allocation,
@@ -448,7 +475,8 @@ class OmniDecodeScheduler(PDKVLifecycle):
         return_logprob: bool = False,
         skip_req: Req | None = None,
     ) -> None:
-        if not self.emit_transferred_token:
+        if not self.emit_transferred_token or self.draft_worker is not None:
+            # note (weixilin): PREBUILT streams the sampled token through committed-token emission.
             super().stream_output(reqs, return_logprob, skip_req)
             return
         else:
@@ -507,6 +535,13 @@ class OmniDecodeScheduler(PDKVLifecycle):
                 self.token_to_kv_pool_allocator.free(admission.allocation.slots)
 
     def abort(self, request_id: str, *, defer_running_cleanup: bool = True) -> None:
+        if self.enable_overlap and self.scheduler_thread_id != threading.get_ident():
+            # note (weixilin): the scheduler will receive this abort through the inbox.
+            return super().abort(
+                request_id, defer_running_cleanup=defer_running_cleanup
+            )
+        else:
+            pass
         with self.pd_lifecycle_lock:
             for req in self.waiting_queue:
                 if req.rid == request_id:
@@ -522,7 +557,9 @@ class OmniDecodeScheduler(PDKVLifecycle):
             )
 
 
-def validate_pd_runtime(scheduler: OmniScheduler) -> None:
+def validate_pd_runtime(
+    scheduler: OmniScheduler, dflash_model_id: str | None = None
+) -> KVCache | None:
     if scheduler.session_adapter is not None:
         raise NotImplementedError(
             "PD session adapters require a retained-state ownership contract"
@@ -550,7 +587,38 @@ def validate_pd_runtime(scheduler: OmniScheduler) -> None:
         raise NotImplementedError("PD currently requires RadixCache disabled")
     else:
         pass
-    if not scheduler.spec_algorithm.is_none():
-        raise NotImplementedError("PD does not support speculative decoding")
+    if scheduler.spec_algorithm.is_none():
+        return None
+    elif not scheduler.spec_algorithm.is_dflash() or not dflash_model_id:
+        raise NotImplementedError("PD supports only explicitly configured DFlash")
+    elif not str(scheduler.device).startswith("cuda"):
+        raise NotImplementedError("PD DFlash requires CUDA")
+    elif scheduler.enable_plain_fallback:
+        raise NotImplementedError("PD DFlash does not support plain fallback")
     else:
         pass
+    draft_worker = scheduler.draft_worker
+    if draft_worker is None or draft_worker.draft_worker is None:
+        raise ValueError("PD DFlash requires a device-resident draft worker")
+    else:
+        pass
+    target_runner = scheduler.tp_worker.model_runner
+    draft_runner = draft_worker.draft_worker.model_runner
+    if (
+        target_runner.token_to_kv_pool
+        is not scheduler.token_to_kv_pool_allocator.get_kvcache()
+        or target_runner.req_to_token_pool is not scheduler.req_to_token_pool
+        or draft_runner.req_to_token_pool is not scheduler.req_to_token_pool
+        or draft_runner.token_to_kv_pool_allocator
+        is not scheduler.token_to_kv_pool_allocator
+        or target_runner.kv_index_translator.space(IdSpaceKind.FULL).write is not None
+        or draft_runner.kv_index_translator.space(IdSpaceKind.FULL).write is not None
+    ):
+        raise NotImplementedError("PD DFlash requires a shared, direct KV slot mapping")
+    else:
+        pass
+    if draft_runner.token_to_kv_pool is target_runner.token_to_kv_pool:
+        raise ValueError("PD DFlash requires separate Target and Draft KV buffers")
+    else:
+        pass
+    return draft_runner.token_to_kv_pool
