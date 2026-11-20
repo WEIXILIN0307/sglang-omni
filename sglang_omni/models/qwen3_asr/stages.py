@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Literal
 
 from sglang_omni.models.qwen3_asr.engine_builder import Qwen3ASREngineBuilder
 from sglang_omni.models.qwen3_asr.request_builders import Qwen3ASRRequestData
@@ -42,8 +43,15 @@ def create_sglang_qwen3_asr_executor(
     enable_encoder_cuda_graph: bool = True,
     max_audio_clip_s: float | None = None,
     server_args_overrides: Mapping[str, object] | None = None,
+    pd_role: Literal["prefill", "decode"] | None = None,
+    pd_stage_name: str | None = None,
+    pd_partner_stage: str | None = None,
+    total_gpu_memory_fraction: float | None = None,
 ) -> OmniScheduler[Qwen3ASRRequestData]:
     builder = Qwen3ASREngineBuilder(
+        pd_role=pd_role,
+        pd_stage_name=pd_stage_name,
+        pd_partner_stage=pd_partner_stage,
         max_running_requests=max_running_requests,
         max_new_tokens=max_new_tokens,
         enable_async_decode=enable_async_decode,
@@ -80,6 +88,7 @@ def create_sglang_qwen3_asr_executor(
             device=device,
             gpu_id=gpu_id,
             dtype=dtype,
+            total_gpu_memory_fraction=(total_gpu_memory_fraction if pd_role else None),
             server_args_overrides=server_args_overrides,
         )
     finally:
