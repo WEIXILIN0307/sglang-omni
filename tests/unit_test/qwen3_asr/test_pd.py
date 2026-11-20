@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """ASR continuation preserves chunk-local transcription semantics."""
 
+import json
 from dataclasses import fields
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 import torch
 from pydantic import ValidationError
+from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 
@@ -134,15 +137,24 @@ def test_asr_pd_retains_audio_chunking_and_streaming_strategy() -> None:
 
 
 @pytest.mark.parametrize("role", ["prefill", "decode"])
+@pytest.mark.parametrize("draft_enabled", [False, True])
 def test_asr_pd_uses_existing_scheduler_factory_hook(
     role: str,
+    draft_enabled: bool,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     builder = object.__new__(engine_builder.Qwen3ASREngineBuilder)
     builder.pd_role = role
     builder.pd_stage_name = "asr" if role == "prefill" else "asr_decode"
     builder.pd_partner_stage = "asr_decode"
-    builder.pd_dflash_model_id = None
+    builder.draft_checkpoint = None
+    if draft_enabled:
+        (tmp_path / "config.json").write_text("{}")
+        builder.draft_checkpoint = Mock(name="draft_checkpoint")
+        builder.draft_checkpoint.name = str(tmp_path)
+    else:
+        pass
     builder.tokenizer = FakeTokenizer()
     builder.make_abort_callback = Mock(return_value=None)
     builder.make_request_finished_callback = Mock(return_value=None)
@@ -160,19 +172,36 @@ def test_asr_pd_uses_existing_scheduler_factory_hook(
     builder.make_model_runner = Mock()
     builder.make_adapters = Mock(return_value=(Mock(), Mock()))
     scheduler, runner = builder.build_runtime(
-        model_worker=Mock(),
+        model_worker=Mock(
+            model_runner=Mock(load_config=LoadConfig(load_format="auto"))
+        ),
         model=Mock(),
         output_proc=Mock(),
         tree_cache=Mock(),
         req_to_token_pool=Mock(),
         token_to_kv_pool_allocator=Mock(),
         server_args=Mock(),
-        model_config=Mock(),
+        model_config=Mock(
+            model_path="Qwen/Qwen3-ASR-1.7B",
+            revision="target-revision",
+            hf_config=Mock(_commit_hash="target-commit"),
+            dtype=torch.bfloat16,
+            quantization=None,
+            model_override_args={},
+        ),
     )
     assert scheduler is factory.return_value
     assert runner is builder.make_model_runner.return_value
     arguments = factory.call_args.kwargs
     assert arguments["stage_name"] == builder.pd_stage_name
+    if draft_enabled:
+        model_identity = json.loads(arguments["dflash_model_id"])
+        assert model_identity["target_path"] == "Qwen/Qwen3-ASR-1.7B"
+        assert model_identity["target_revision"] == "target-revision"
+        assert model_identity["target_commit"] == "target-commit"
+        assert model_identity["load_format"] == "auto"
+    else:
+        assert arguments["dflash_model_id"] is None
     if role == "prefill":
         assert arguments["stream_output_builder"] is None
         assert arguments["partner_stage"] == "asr_decode"

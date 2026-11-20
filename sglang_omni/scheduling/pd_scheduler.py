@@ -466,10 +466,6 @@ class OmniDecodeScheduler(PDKVLifecycle):
                     self.emit_request_error(request_id, exc)
                     continue
                 self.pd_deferred_admission = None
-                if self.draft_worker is not None:
-                    req.omni_data.decode_path = "spec"
-                else:
-                    pass
                 self.waiting_queue.append(req)
                 self.outbox.put(admitted)
 

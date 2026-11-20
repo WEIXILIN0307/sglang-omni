@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -161,7 +162,6 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
             pass
         self.max_running_requests = max_running_requests
         self.draft_checkpoint: TemporaryDirectory[str] | None = None
-        self.pd_dflash_model_id: str | None = None
         self.pd_dflash_greedy_only: bool = False
         self.max_new_tokens = max_new_tokens
         self.enable_async_decode = enable_async_decode
@@ -467,7 +467,6 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
                     draft_worker_class,
                 )
 
-                draft_directory = Path(self.draft_checkpoint.name)
                 if (
                     draft_worker_class(self.draft_checkpoint.name)
                     is not ReducedVocabularyDFlashWorker
@@ -485,16 +484,6 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
                     )
                 else:
                     pass
-                self.pd_dflash_model_id = "\n".join(
-                    (
-                        str(Path(self.checkpoint_dir).resolve()),
-                        (draft_directory / "config.json").read_text(),
-                        *sorted(
-                            str(path.resolve())
-                            for path in draft_directory.glob("*.safetensors")
-                        ),
-                    )
-                )
                 self.pd_dflash_greedy_only = not is_dflash_sampling_verify_available()
                 if self.pd_role == "prefill":
                     # note (weixilin): a pending Prefill result still owns the rows until handoff detaches them.
@@ -683,6 +672,41 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
             )
         else:
             pass
+        dflash_model_id = None
+        if self.draft_checkpoint is not None:
+            load_config = model_worker.model_runner.load_config
+            target_path = Path(model_config.model_path)
+            draft_directory = Path(self.draft_checkpoint.name)
+            dflash_model_id = json.dumps(
+                {
+                    "target_path": (
+                        str(target_path.resolve())
+                        if target_path.is_dir()
+                        else model_config.model_path
+                    ),
+                    "target_revision": model_config.revision,
+                    "target_commit": getattr(
+                        model_config.hf_config,
+                        "_commit_hash",  # noqa: leading-underscore  # Transformers checkpoint provenance
+                        None,
+                    ),
+                    "target_dtype": str(model_config.dtype),
+                    "target_quantization": model_config.quantization,
+                    "target_overrides": model_config.model_override_args,
+                    "load_format": load_config.load_format,
+                    "loader_options": load_config.model_loader_extra_config,
+                    "draft_config": json.loads(
+                        (draft_directory / "config.json").read_text()
+                    ),
+                    "draft_weights": sorted(
+                        str(path.resolve())
+                        for path in draft_directory.glob("*.safetensors")
+                    ),
+                },
+                sort_keys=True,
+            )
+        else:
+            pass
         adapter = Qwen3ASRPDAdapter(tokenizer=self.tokenizer)
         scheduler_kwargs = dict(
             tp_worker=model_worker,
@@ -707,7 +731,7 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
                 stage_name=self.pd_stage_name,
                 partner_stage=self.pd_partner_stage,
                 state_builder=adapter.build_state,
-                dflash_model_id=self.pd_dflash_model_id,
+                dflash_model_id=dflash_model_id,
                 **scheduler_kwargs,
             )
         else:
@@ -716,7 +740,7 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
                 state_restorer=adapter.restore_state,
                 resume_schema=adapter.schema,
                 emit_transferred_token=True,
-                dflash_model_id=self.pd_dflash_model_id,
+                dflash_model_id=dflash_model_id,
                 **scheduler_kwargs,
             )
 

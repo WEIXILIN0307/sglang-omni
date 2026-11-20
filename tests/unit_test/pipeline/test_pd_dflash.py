@@ -192,7 +192,6 @@ def test_committed_dflash_request_seeds_native_prebuilt(overlap: bool) -> None:
     receiver.commit(prepare, destination)
     scheduler.drain_decode_admissions()
     [request] = scheduler.waiting_queue
-    assert request.omni_data.decode_path == "spec"
     assert request.omni_data.emitted_token_count == 0
     assert list(request.output_ids) == [42]
     assert request.sampling_params.sampling_seed == 17
