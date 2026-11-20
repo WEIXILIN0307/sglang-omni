@@ -604,11 +604,18 @@ def validate_pd_runtime(
         pass
     target_runner = scheduler.tp_worker.model_runner
     draft_runner = draft_worker.draft_worker.model_runner
+    # note (weixilin): compact DFlash rebuilds its private request table from Target slots before verify.
+    shares_request_table = draft_runner.req_to_token_pool is scheduler.req_to_token_pool
     if (
         target_runner.token_to_kv_pool
         is not scheduler.token_to_kv_pool_allocator.get_kvcache()
         or target_runner.req_to_token_pool is not scheduler.req_to_token_pool
-        or draft_runner.req_to_token_pool is not scheduler.req_to_token_pool
+        or shares_request_table == draft_worker.use_compact_draft_cache
+        or (
+            not shares_request_table
+            and draft_runner.req_to_token_pool.req_to_token.shape[0]
+            < scheduler.req_to_token_pool.req_to_token.shape[0]
+        )
         or draft_runner.token_to_kv_pool_allocator
         is not scheduler.token_to_kv_pool_allocator
         or target_runner.kv_index_translator.space(IdSpaceKind.FULL).write is not None

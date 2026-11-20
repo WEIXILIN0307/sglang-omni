@@ -578,3 +578,12 @@ curl --fail-with-body --no-buffer http://localhost:8000/v1/audio/transcriptions 
   -F 'file=@tests/data/query_to_draw.wav' -F stream=true \
   -F temperature=0 -F return_spec_tokens_details=true
 ```
+
+To limit Draft attention to the most recent 32 tokens during Decode, set the native DFlash window on that stage:
+
+```bash
+sgl-omni serve --config examples/configs/qwen3_asr_pd_dflash.yaml \
+  --asr_decode.engine.speculative_draft_window_size 32
+```
+
+SGLang rebuilds the compact Draft request table from the transferred slot mapping before verification. The Target retains full context and the handoff still transfers the full prompt KV for both models.
