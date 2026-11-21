@@ -113,6 +113,7 @@ def test_joint_kv_rejects_wrong_row_capacity_or_registration_order() -> None:
     "variant, error",
     [
         ("valid", None),
+        ("candidate_selector", None),
         ("missing_opt_in", "explicitly configured DFlash"),
         ("private_table", "shared, direct KV slot mapping"),
         ("private_allocator", "shared, direct KV slot mapping"),
@@ -158,7 +159,8 @@ def test_pd_dflash_validates_the_initialized_worker(
     )
     scheduler.tp_worker = SimpleNamespace(model_runner=target_runner)
     scheduler.draft_worker = SimpleNamespace(
-        draft_worker=SimpleNamespace(model_runner=draft_runner), selector=None
+        draft_worker=SimpleNamespace(model_runner=draft_runner),
+        selector=object() if variant == "candidate_selector" else None,
     )
     enable_dflash = variant != "missing_opt_in"
     if error is None:

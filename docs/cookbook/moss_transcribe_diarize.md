@@ -292,6 +292,12 @@ sgl-omni serve --config examples/configs/moss_td_pd.yaml --port 8000
 
 This profile uses synchronous scheduling, TP=1, and disables speculative decoding and RadixCache.
 
+To enable DFlash2 across the split, use the profile that loads the same pinned draft on both GPUs. Prefill populates the Target and Draft KV caches. Decode continues from both caches and runs SGLang's native DFlash2 selector and verification.
+
+```bash
+sgl-omni serve --config examples/configs/moss_td_pd_dflash2.yaml --port 8000
+```
+
 ## Benchmarking
 
 Thanks to the Moss team for providing the benchmark datasets, we prepare movies800times, aishell4_long, and googletime as benchmark datasets for multi-speaker ASR. movies800times is a short-sequence dataset with 800 dialog clips, aishell4_long with googletime are long-sequence dataset of long-form meeting audio, and English podcasts. These datasets are right now under private license, and you can contact the Moss team for access.

@@ -608,10 +608,6 @@ def validate_pd_runtime(
     draft_worker = scheduler.draft_worker
     if draft_worker is None or draft_worker.draft_worker is None:
         raise ValueError("PD DFlash requires a device-resident draft worker")
-    elif draft_worker.selector is not None:
-        raise NotImplementedError(
-            "PD DFlash requires a draft without a candidate selector"
-        )
     else:
         pass
     target_runner = scheduler.tp_worker.model_runner
