@@ -236,20 +236,19 @@ class MossTranscribeDiarizeEngineBuilder(
         speculative_algorithm = SpeculativeAlgorithm.from_string(
             overrides.get("speculative_algorithm")
         )
-        if self.pd_role is not None:
-            if not speculative_algorithm.is_none() or draft_model_path is not None:
-                raise ValueError("MOSS-TD PD requires speculative decoding disabled")
-            elif self.enable_async_decode or not overrides["disable_overlap_schedule"]:
-                raise ValueError("MOSS-TD PD requires synchronous scheduling")
-            else:
-                self.enable_async_decode = False
-        elif speculative_algorithm.is_none():
+        if self.pd_role is not None and (
+            self.enable_async_decode or not overrides["disable_overlap_schedule"]
+        ):
+            raise ValueError("MOSS-TD PD requires synchronous scheduling")
+        else:
+            pass
+        if speculative_algorithm.is_none():
             if draft_model_path is not None:
                 raise ValueError(
                     "speculative_draft_model_path needs a speculative_algorithm"
                 )
             elif self.enable_async_decode is None:
-                self.enable_async_decode = True
+                self.enable_async_decode = self.pd_role is None
             else:
                 pass
         elif not speculative_algorithm.is_dflash():
@@ -403,6 +402,7 @@ class MossTranscribeDiarizeEngineBuilder(
                 stage_name="asr",
                 partner_stage="asr_decode",
                 state_builder=build_prefill_state,
+                enable_dflash=self.speculative_worker_class is not None,
             )
         elif self.pd_role == "decode":
             return partial(
@@ -411,6 +411,7 @@ class MossTranscribeDiarizeEngineBuilder(
                 state_restorer=restore_decode_state,
                 resume_schema=RESUME_SCHEMA,
                 emit_transferred_token=True,
+                enable_dflash=self.speculative_worker_class is not None,
             )
         else:
             return super().scheduler_factory()
